@@ -1,0 +1,61 @@
+name: Sync OFAC SDN Names
+
+on:
+  schedule:
+    - cron: '0 1 * * *'   # 01:00 UTC daily — runs before KYA Worker cron at 02:00 UTC
+  workflow_dispatch:        # manual trigger via GitHub UI or API
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # needed to push the updated JSON back to the repo
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch SDN CSV (primary entities)
+        run: |
+          curl -sSf -A "Mozilla/5.0 (compatible; ofac-sdn-mirror/1.0; +https://github.com/clearagent/ofac-sdn-mirror)" \
+            -o sdn.csv \
+            "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV" \
+          || curl -sSf -A "Mozilla/5.0" \
+            -o sdn.csv \
+            "https://www.treasury.gov/ofac/downloads/sdn.csv"
+          echo "SDN CSV size: $(wc -c < sdn.csv) bytes, $(wc -l < sdn.csv) lines"
+
+      - name: Fetch ALT CSV (aliases / AKAs)
+        run: |
+          curl -sSf -A "Mozilla/5.0 (compatible; ofac-sdn-mirror/1.0; +https://github.com/clearagent/ofac-sdn-mirror)" \
+            -o alt.csv \
+            "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/ALT.CSV" \
+          || curl -sSf -A "Mozilla/5.0" \
+            -o alt.csv \
+            "https://www.treasury.gov/ofac/downloads/alt.csv"
+          echo "ALT CSV size: $(wc -c < alt.csv) bytes, $(wc -l < alt.csv) lines"
+
+      - name: Parse and normalise names
+        run: python3 parse_ofac.py
+
+      - name: Sanity check
+        run: |
+          COUNT=$(python3 -c "import json; d=json.load(open('ofac_names.json')); print(len(d))")
+          echo "Parsed $COUNT names"
+          if [ "$COUNT" -lt 500 ]; then
+            echo "❌ Sanity check failed — fewer than 500 names parsed"
+            exit 1
+          fi
+          echo "✓ Sanity check passed"
+
+      - name: Commit and push
+        run: |
+          git config user.name  "ofac-sdn-mirror[bot]"
+          git config user.email "bot@clearagent.dev"
+          git add ofac_names.json metadata.json
+          if git diff --staged --quiet; then
+            echo "No changes — SDN list unchanged since last sync"
+          else
+            git commit -m "sync: OFAC SDN names $(date -u +%Y-%m-%d)"
+            git push
+          fi
