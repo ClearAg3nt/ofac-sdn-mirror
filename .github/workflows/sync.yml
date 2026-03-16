@@ -19,44 +19,64 @@ jobs:
 
       - name: Fetch SDN CSV (primary entities)
         run: |
-          echo "Fetching SDN CSV..."
-          HTTP_STATUS=$(curl -s -w "%{http_code}" -A "Mozilla/5.0 (compatible; ofac-sdn-mirror/1.0; +https://github.com/ClearAg3nt/ofac-sdn-mirror)" \
-            -o sdn.csv \
-            "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV")
-          echo "Primary source HTTP status: $HTTP_STATUS"
-          if [ "$HTTP_STATUS" != "200" ] || [ ! -s sdn.csv ]; then
-            echo "Primary source failed (status $HTTP_STATUS or empty file), trying fallback..."
-            HTTP_STATUS=$(curl -s -w "%{http_code}" -A "Mozilla/5.0" \
-              -o sdn.csv \
-              "https://www.treasury.gov/ofac/downloads/sdn.csv")
-            echo "Fallback HTTP status: $HTTP_STATUS"
-          fi
-          if [ ! -s sdn.csv ]; then
-            echo "❌ Both SDN CSV sources failed — cannot proceed"
-            exit 1
-          fi
-          echo "SDN CSV size: $(wc -c < sdn.csv) bytes, $(wc -l < sdn.csv) lines"
-          head -c 200 sdn.csv
+          fetch_csv() {
+            local url="$1" outfile="$2" label="$3"
+            echo "Trying $label..."
+            HTTP_STATUS=$(curl -sL -w "%{http_code}" \
+              -A "Mozilla/5.0 (compatible; ofac-sdn-mirror/1.0; +https://github.com/ClearAg3nt/ofac-sdn-mirror)" \
+              --max-time 60 -o "$outfile" "$url")
+            echo "  HTTP status: $HTTP_STATUS"
+            if [ "$HTTP_STATUS" != "200" ] || [ ! -s "$outfile" ]; then
+              echo "  ❌ Failed (status $HTTP_STATUS or empty)"
+              return 1
+            fi
+            # Reject HTML responses (error pages that return 200)
+            if head -c 256 "$outfile" | grep -qi "<!doctype\|<html\|<head"; then
+              echo "  ❌ Got HTML page instead of CSV — server is returning an error page"
+              head -c 500 "$outfile"
+              return 1
+            fi
+            echo "  ✓ Size: $(wc -c < "$outfile") bytes, $(wc -l < "$outfile") lines"
+            head -1 "$outfile"
+            return 0
+          }
+          fetch_csv \
+            "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV" \
+            sdn.csv "OFAC API (primary)" \
+          || fetch_csv \
+            "https://www.treasury.gov/ofac/downloads/sdn.csv" \
+            sdn.csv "treasury.gov (fallback)" \
+          || { echo "❌ All SDN CSV sources failed"; exit 1; }
 
       - name: Fetch ALT CSV (aliases / AKAs)
         run: |
-          echo "Fetching ALT CSV..."
-          HTTP_STATUS=$(curl -s -w "%{http_code}" -A "Mozilla/5.0 (compatible; ofac-sdn-mirror/1.0; +https://github.com/ClearAg3nt/ofac-sdn-mirror)" \
-            -o alt.csv \
-            "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/ALT.CSV")
-          echo "Primary source HTTP status: $HTTP_STATUS"
-          if [ "$HTTP_STATUS" != "200" ] || [ ! -s alt.csv ]; then
-            echo "Primary source failed (status $HTTP_STATUS or empty file), trying fallback..."
-            HTTP_STATUS=$(curl -s -w "%{http_code}" -A "Mozilla/5.0" \
-              -o alt.csv \
-              "https://www.treasury.gov/ofac/downloads/alt.csv")
-            echo "Fallback HTTP status: $HTTP_STATUS"
-          fi
-          if [ ! -s alt.csv ]; then
-            echo "❌ Both ALT CSV sources failed — cannot proceed"
-            exit 1
-          fi
-          echo "ALT CSV size: $(wc -c < alt.csv) bytes, $(wc -l < alt.csv) lines"
+          fetch_csv() {
+            local url="$1" outfile="$2" label="$3"
+            echo "Trying $label..."
+            HTTP_STATUS=$(curl -sL -w "%{http_code}" \
+              -A "Mozilla/5.0 (compatible; ofac-sdn-mirror/1.0; +https://github.com/ClearAg3nt/ofac-sdn-mirror)" \
+              --max-time 60 -o "$outfile" "$url")
+            echo "  HTTP status: $HTTP_STATUS"
+            if [ "$HTTP_STATUS" != "200" ] || [ ! -s "$outfile" ]; then
+              echo "  ❌ Failed (status $HTTP_STATUS or empty)"
+              return 1
+            fi
+            if head -c 256 "$outfile" | grep -qi "<!doctype\|<html\|<head"; then
+              echo "  ❌ Got HTML page instead of CSV"
+              head -c 500 "$outfile"
+              return 1
+            fi
+            echo "  ✓ Size: $(wc -c < "$outfile") bytes, $(wc -l < "$outfile") lines"
+            head -1 "$outfile"
+            return 0
+          }
+          fetch_csv \
+            "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/ALT.CSV" \
+            alt.csv "OFAC API (primary)" \
+          || fetch_csv \
+            "https://www.treasury.gov/ofac/downloads/alt.csv" \
+            alt.csv "treasury.gov (fallback)" \
+          || { echo "❌ All ALT CSV sources failed"; exit 1; }
 
       - name: Parse and normalise names
         run: python3 parse_ofac.py
