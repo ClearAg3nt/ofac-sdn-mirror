@@ -78,6 +78,40 @@ jobs:
             alt.csv "treasury.gov (fallback)" \
           || { echo "❌ All ALT CSV sources failed"; exit 1; }
 
+      - name: Diagnose CSV format
+        run: |
+          echo "=== sdn.csv first 3 rows ==="
+          head -3 sdn.csv
+          echo ""
+          echo "=== sdn.csv column count on row 2 ==="
+          python3 -c "
+          import csv
+          with open('sdn.csv', encoding='utf-8', errors='replace') as f:
+              r = csv.reader(f)
+              for i, row in enumerate(r):
+                  print(f'Row {i}: {len(row)} columns')
+                  for j, val in enumerate(row):
+                      print(f'  [{j}] {repr(val[:60])}')
+                  if i >= 2:
+                      break
+          "
+          echo ""
+          echo "=== alt.csv first 3 rows ==="
+          head -3 alt.csv
+          echo ""
+          echo "=== alt.csv column count on row 2 ==="
+          python3 -c "
+          import csv
+          with open('alt.csv', encoding='utf-8', errors='replace') as f:
+              r = csv.reader(f)
+              for i, row in enumerate(r):
+                  print(f'Row {i}: {len(row)} columns')
+                  for j, val in enumerate(row):
+                      print(f'  [{j}] {repr(val[:60])}')
+                  if i >= 2:
+                      break
+          "
+
       - name: Parse and normalise names
         run: python3 parse_ofac.py
 
