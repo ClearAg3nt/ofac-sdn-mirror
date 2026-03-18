@@ -125,6 +125,23 @@ jobs:
           fi
           echo "✓ Sanity check passed"
 
+      - name: Push to Cloudflare KV
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # Write the names array directly to KV — bypasses raw.githubusercontent.com fetch
+          npx wrangler@latest kv key put \
+            --namespace-id 018833e0500d4df5b179c6c568e60d30 \
+            "ofac:names:v1" \
+            --path ofac_names.json
+          # Write metadata
+          npx wrangler@latest kv key put \
+            --namespace-id 018833e0500d4df5b179c6c568e60d30 \
+            "ofac:names:meta" \
+            "$(cat metadata.json)"
+          echo "✓ KV updated"
+
       - name: Commit and push
         run: |
           git config user.name  "ofac-sdn-mirror[bot]"
