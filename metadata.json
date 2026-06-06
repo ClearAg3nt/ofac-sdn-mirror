@@ -1,6 +1,6 @@
 {
-  "syncedAt": "2026-06-05T05:06:30.043186+00:00",
-  "count": 38746,
+  "syncedAt": "2026-06-06T04:43:51.949421+00:00",
+  "count": 38775,
   "source": "OFAC SDN + ALT lists (ofac.treas.gov)",
   "columns": {
     "sdn.csv": "SDN_Name (index 1)",
