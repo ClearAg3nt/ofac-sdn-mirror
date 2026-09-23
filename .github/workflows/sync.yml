@@ -145,6 +145,17 @@ jobs:
             --namespace-id 018833e0500d4df5b179c6c568e60d30 \
             "ofac:names:meta" \
             "$(cat metadata.json)"
+          # Secondary identifiers + SDN entry types (person vs entity, DOB, nationality,
+          # national ID / passport). Consumed by /v1/screen for identifier comparison.
+          npx wrangler@4 kv key put \
+            --namespace-id 018833e0500d4df5b179c6c568e60d30 \
+            "ofac:ids:v1" \
+            --path ofac_identifiers.json
+          # Types-only projection (name -> i/e/v/a) — small, kept warm per request.
+          npx wrangler@4 kv key put \
+            --namespace-id 018833e0500d4df5b179c6c568e60d30 \
+            "ofac:types:v1" \
+            --path ofac_types.json
           echo "✓ KV updated"
 
       - name: Commit and push
