@@ -64,8 +64,12 @@ print(f"  alt.csv  → {len(alt_names):,} alias names")
 names_list = sorted(all_names)
 print(f"  total    → {len(names_list):,} unique normalised names")
 
+import hashlib
 meta = {
     "syncedAt": datetime.now(timezone.utc).isoformat(),
+    # Raw-byte hash of the sdn.csv this name list came from; gate G1 requires it to
+    # equal sdn_identifiers.json listVersion.sha256 (same download for both indexes).
+    "sha256":   hashlib.sha256(open("sdn.csv", "rb").read()).hexdigest(),
     "count":    len(names_list),
     "source":   "OFAC SDN + ALT lists (ofac.treas.gov)",
     "columns":  {"sdn.csv": "SDN_Name (index 1)", "alt.csv": "alt_name (index 3)"},
