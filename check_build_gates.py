@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""v0.5.1 publish gates (spec 3.2). Run after the build, before the KV push.
+"""Publish gates G1-G9 (v0.5.1 spec 3.2, v0.5.2 spec 2.4). Run after the build, before the KV push.
 
-  python check_build_gates.py sdn.csv sdn_identifiers.json metadata.json
+  python check_build_gates.py sdn.csv sdn_identifiers.json metadata.json names.json \
+      [--previous prev_identifiers.json] [--manifest-out manifest.json]
 
-Exits non-zero on any G1-G6 failure, so the workflow stops and KV keeps the previous
-index. G7 (freshness) only warns. The Worker builds its UID-carrying name index from
-sdn_identifiers.json (primary + alias names per entry), so that is the name index the
-G2/G3 checks model.
+Exits non-zero on any G1-G6, G8 or G9 failure, so the workflow publishes nothing and KV keeps
+the previous manifest. G7 (freshness) only warns. On success, --manifest-out writes the
+sdn:current manifest (spec 2.2) for this build.
 """
-import csv, datetime, hashlib, json, re, sys, unicodedata
+import argparse, csv, datetime, hashlib, json, re, sys, unicodedata
 
-CANARIES = ["45391", "34598", "16688", "58525", "22790", "26946"]
+CANARIES = ["45391", "34598", "16688", "58525", "22790", "26946", "36025", "58930"]
 
 
 def norm_name(s):  # mirrors worker normName() closely enough to tell "usable" from "empty"
@@ -18,10 +18,11 @@ def norm_name(s):  # mirrors worker normName() closely enough to tell "usable" f
     return re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9 ]", " ", s)).strip()
 
 
-def check(sdn_path, idx_path, meta_path):
+def check(sdn_path, idx_path, meta_path, names_path, prev_path=None):
     raw = open(sdn_path, "rb").read()
     idx = json.load(open(idx_path))
     meta = json.load(open(meta_path))
+    names = json.load(open(names_path))
     lv, stats, entries = idx["listVersion"], idx.get("stats", {}), idx["entries"]
     rows = [r for r in csv.reader(raw.decode("latin-1").splitlines()) if len(r) > 11]
     csv_uids = {r[0] for r in rows}
@@ -75,12 +76,44 @@ def check(sdn_path, idx_path, meta_path):
         p = lambda s: datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
         age = (p(fa) - p(lm)).total_seconds() / 3600
         if age > 36: warns.append(f"G7 OFAC file is {age:.0f}h older than fetchedAt")
+
+    # G8 delisting: UIDs in the previous build but no longer in SDN.CSV are in no new index.
+    published_uids = set(entries) | {r[0] for r in names["rows"]}
+    if prev_path:
+        removed = set(json.load(open(prev_path))["entries"]) - csv_uids
+        stale = sorted(removed & published_uids)
+        if stale: fails.append(f"G8 {len(stale)} delisted UIDs still published: {stale[:10]}")
+    if any(norm_name(r[1]) == "TORNADO CASH" for r in names["rows"]):
+        fails.append("G8 canary: an entity named TORNADO CASH is published (delisted 2025-03-21)")
+
+    # G9 no orphan sources: the names index the Worker matches against is this build, row for row.
+    if names.get("listVersion", {}).get("sha256") != sha:
+        fails.append(f"G9 names index sha {names.get('listVersion', {}).get('sha256')} != SDN.CSV {sha}")
+    orphans = sorted({r[0] for r in names["rows"] if r[0] not in entries})
+    if orphans: fails.append(f"G9 {len(orphans)} name rows with UID not in the identifier index: {orphans[:10]}")
+    if len(names["rows"]) != len(name_rows) + sum(1 for uid, e in entries.items()
+            for n in [e["name"], *(a["name"] for a in e.get("aliases", []))] if not norm_name(n)):
+        fails.append(f"G9 names index has {len(names['rows'])} rows, identifier index has a different variant count")
     return fails, warns
 
 
+def manifest(idx, fails):
+    lv = idx["listVersion"]
+    sha = lv["sha256"]
+    return {"listVersion": lv,
+            "keys": {"names": f"names:{sha}", "identifiers": f"ids:{sha}"},
+            "archive": {"sdn": f"r2://ofac/sdn/{sha}.csv", "alt": f"r2://ofac/alt/{lv.get('altSha256')}.csv"},
+            "gates": {g: not any(f.startswith(g + " ") for f in fails) for g in ["G1", "G2", "G3", "G4", "G5", "G6", "G8", "G9"]}}
+
+
 if __name__ == "__main__":
-    fails, warns = check(*sys.argv[1:4])
+    ap = argparse.ArgumentParser()
+    ap.add_argument("sdn"); ap.add_argument("ids"); ap.add_argument("meta"); ap.add_argument("names")
+    ap.add_argument("--previous"); ap.add_argument("--manifest-out")
+    a = ap.parse_args()
+    fails, warns = check(a.sdn, a.ids, a.meta, a.names, a.previous)
     for w in warns: print(f"::warning::{w}", file=sys.stderr)
     for f in fails: print(f"::error::{f}", file=sys.stderr)
     if fails: sys.exit(f"{len(fails)} publish gate(s) failed; not publishing")
-    print("✓ publish gates G1-G6 passed" + (f" ({len(warns)} G7 warning)" if warns else ""))
+    if a.manifest_out: json.dump(manifest(json.load(open(a.ids)), fails), open(a.manifest_out, "w"), indent=1)
+    print("✓ publish gates G1-G6, G8, G9 passed" + (f" ({len(warns)} G7 warning)" if warns else ""))

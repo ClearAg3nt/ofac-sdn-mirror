@@ -1,12 +1,49 @@
 name: Sync OFAC SDN Names
 
+# v0.5.2 (spec 2.1): one pipeline, one manifest. Poll hourly; rebuild when OFAC's
+# Last-Modified changes, and every night at 02:00 UTC regardless.
 on:
   schedule:
-    - cron: '0 1 * * *'   # 01:00 UTC daily — runs before KYA Worker cron at 02:00 UTC
-  workflow_dispatch:        # manual trigger via GitHub UI or API
+    - cron: '7 * * * *'
+  workflow_dispatch:        # manual trigger via GitHub UI or API — always rebuilds
+
+env:
+  KV_NAMESPACE: 018833e0500d4df5b179c6c568e60d30
 
 jobs:
+  poll:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.poll.outputs.build }}
+    steps:
+      - name: Compare OFAC Last-Modified with the published manifest
+        id: poll
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # 1-byte ranged GET, not HEAD: the OFAC API answers HEAD itself with a stale Last-Modified;
+          # only GET redirects to the current S3 object and its real Last-Modified.
+          LM=$(curl -sL -r 0-0 --max-time 60 -D - -o /dev/null "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV" \
+            | grep -i '^last-modified:' | tail -1 | sed 's/^[^:]*: *//' | tr -d '\r')
+          OFAC_LM=$(python3 -c "import sys,email.utils as e; print(e.parsedate_to_datetime(sys.argv[1]).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$LM" 2>/dev/null || echo "")
+          # wrangler 4 kv commands default to LOCAL storage: --remote is required to touch production KV.
+          CUR=$(npx wrangler@4 kv key get --remote --namespace-id "$KV_NAMESPACE" "sdn:current" 2>/dev/null \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['listVersion'].get('ofacLastModified',''))" 2>/dev/null || echo "")
+          echo "OFAC Last-Modified: $OFAC_LM; manifest: ${CUR:-none}"
+          if [ -n "$OFAC_LM" ] && [ -n "$CUR" ] && [ "$OFAC_LM" \> "$CUR" ]; then
+            LAG=$(( $(date -d "$OFAC_LM" +%s) - $(date -d "$CUR" +%s) ))
+            if [ "$LAG" -gt 7200 ]; then echo "::warning::G7 manifest is $((LAG/3600))h behind OFAC Last-Modified"; fi
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(date -u +%H)" = "02" ] || [ -z "$CUR" ] || [ "$OFAC_LM" != "$CUR" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"; echo "No new OFAC file — skipping build"
+          fi
+
   sync:
+    needs: poll
+    if: needs.poll.outputs.build == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write       # needed to push the updated JSON back to the repo
@@ -126,11 +163,40 @@ jobs:
       - name: Parse and normalise names
         run: python3 parse_ofac.py
 
-      - name: Build v0.5.1 identifier index
-        run: python3 ingest_sdn_identifiers.py sdn.csv alt.csv sdn_identifiers.json "$OFAC_LAST_MODIFIED" "$FETCHED_AT"
+      - name: Build identifier index and name index from the same download
+        run: |
+          python3 ingest_sdn_identifiers.py sdn.csv alt.csv sdn_identifiers.json "$OFAC_LAST_MODIFIED" "$FETCHED_AT"
+          python3 build_names_index.py sdn_identifiers.json names.json
+          echo "SDN_SHA=$(python3 -c "import json; print(json.load(open('sdn_identifiers.json'))['listVersion']['sha256'])")" >> "$GITHUB_ENV"
+          echo "ALT_SHA=$(sha256sum alt.csv | cut -d' ' -f1)" >> "$GITHUB_ENV"
 
-      - name: Publish gates G1-G7 (fail = keep previous KV index)
-        run: python3 check_build_gates.py sdn.csv sdn_identifiers.json metadata.json
+      - name: Fetch the previous build (for G8 delisting)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          PREV_KEY=$(npx wrangler@4 kv key get --remote --namespace-id "$KV_NAMESPACE" "sdn:current" 2>/dev/null \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['keys']['identifiers'])" 2>/dev/null || echo "ofac:ids:v2")
+          npx wrangler@4 kv key get --remote --namespace-id "$KV_NAMESPACE" "$PREV_KEY" > prev_identifiers.json 2>/dev/null \
+            && python3 -c "import json; json.load(open('prev_identifiers.json'))['entries']" \
+            && echo "PREV_ARG=--previous prev_identifiers.json" >> "$GITHUB_ENV" \
+            || echo "::warning::no previous build readable from KV ($PREV_KEY); G8 runs on the TORNADO CASH canary only"
+
+      - name: Publish gates G1-G9 (fail = publish nothing, keep previous manifest)
+        run: python3 check_build_gates.py sdn.csv sdn_identifiers.json metadata.json names.json $PREV_ARG --manifest-out manifest.json
+
+      - name: Archive raw OFAC files (V3, 7-year retention)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_ARCHIVE_BUCKET }}
+        run: |
+          if [ -z "$R2_BUCKET" ]; then
+            echo "::warning::R2_ARCHIVE_BUCKET is not set — raw files NOT archived (spec V3). Enable R2 and set the repo variable."
+            exit 0
+          fi
+          npx wrangler@4 r2 object put --remote "$R2_BUCKET/ofac/sdn/$SDN_SHA.csv" --file sdn.csv --content-type text/csv
+          npx wrangler@4 r2 object put --remote "$R2_BUCKET/ofac/alt/$ALT_SHA.csv" --file alt.csv --content-type text/csv
 
       - name: Sanity check
         run: |
@@ -152,38 +218,20 @@ jobs:
           print('✓ Identifier index sanity check passed')
           "
 
-      - name: Push to Cloudflare KV
+      - name: Publish to Cloudflare KV (content-addressed indexes first, manifest last)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          # Write the names array directly to KV — bypasses raw.githubusercontent.com fetch
-          npx wrangler@4 kv key put \
-            --namespace-id 018833e0500d4df5b179c6c568e60d30 \
-            "ofac:names:v1" \
-            --path ofac_names.json
-          # Write metadata
-          npx wrangler@4 kv key put \
-            --namespace-id 018833e0500d4df5b179c6c568e60d30 \
-            "ofac:names:meta" \
-            "$(cat metadata.json)"
-          # Secondary identifiers + SDN entry types (person vs entity, DOB, nationality,
-          # national ID / passport). Consumed by /v1/screen for identifier comparison.
-          npx wrangler@4 kv key put \
-            --namespace-id 018833e0500d4df5b179c6c568e60d30 \
-            "ofac:ids:v1" \
-            --path ofac_identifiers.json
-          # Types-only projection (name -> i/e/v/a) — small, kept warm per request.
-          npx wrangler@4 kv key put \
-            --namespace-id 018833e0500d4df5b179c6c568e60d30 \
-            "ofac:types:v1" \
-            --path ofac_types.json
-          # v0.5.0: full identifier index (DOB, nationality, documents, wallets per UID)
-          npx wrangler@4 kv key put \
-            --namespace-id 018833e0500d4df5b179c6c568e60d30 \
-            "ofac:ids:v2" \
-            --path sdn_identifiers.json
-          echo "✓ KV updated"
+          put() { npx wrangler@4 kv key put --remote --namespace-id "$KV_NAMESPACE" "$@"; }
+          put "names:$SDN_SHA" --path names.json
+          put "ids:$SDN_SHA"   --path sdn_identifiers.json
+          # Rollout step 1: the v0.5.1 single-object keys, read by the worker only while no manifest exists.
+          put "ofac:ids:v2"     --path sdn_identifiers.json
+          put "ofac:names:meta" "$(cat metadata.json)"
+          # The pointer goes last: a worker sees either the old build or the new one, never a mix.
+          put "sdn:current" --path manifest.json
+          echo "✓ KV updated: sdn:current -> $SDN_SHA"
 
       - name: Commit and push
         run: |
