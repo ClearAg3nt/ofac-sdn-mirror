@@ -47,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write       # needed to push the updated JSON back to the repo
+      issues: write         # "Open issue on failure"
 
     steps:
       - name: Checkout
