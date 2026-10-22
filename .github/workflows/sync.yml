@@ -25,6 +25,10 @@ jobs:
         run: |
           # 1-byte ranged GET, not HEAD: the OFAC API answers HEAD itself with a stale Last-Modified;
           # only GET redirects to the current S3 object and its real Last-Modified.
+          # Note: the ranged GET and the full download may report slightly different Last-Modified
+          # timestamps (typically a few seconds apart) because OFAC's CDN serves them from
+          # separate S3 objects. The manifest records the full download's timestamp; this poll
+          # records the ranged GET's. G7 lag tolerates this because the threshold is 2 hours.
           LM=$(curl -sL -r 0-0 --max-time 60 -D - -o /dev/null "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV" \
             | grep -i '^last-modified:' | tail -1 | sed 's/^[^:]*: *//' | tr -d '\r')
           OFAC_LM=$(python3 -c "import sys,email.utils as e; print(e.parsedate_to_datetime(sys.argv[1]).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$LM" 2>/dev/null || echo "")
