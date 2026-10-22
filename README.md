@@ -52,3 +52,15 @@ Both files are fetched from `sanctionslistservice.ofac.treas.gov` (with `www.tre
 CLEARAGENT is the compliance layer for AI agent payments — OFAC screening, spend policy enforcement, and W3C Verifiable Credentials for autonomous agents. Live API at [api.clearagent.dev](https://api.clearagent.dev).
 
 Proposing `X-KYA-Token` as a header extension for the [x402 payment protocol](https://github.com/coinbase/x402/issues/1547).
+
+## CI secrets and variables (v0.5.2 pipeline)
+
+`.github/workflows/sync.yml` publishes to production Cloudflare KV and R2, so its token must be able to write both.
+
+| Name | Kind | Value |
+|------|------|-------|
+| `CLOUDFLARE_API_TOKEN` | secret | Custom API token with **Account → Workers KV Storage: Edit** and **Account → Workers R2 Storage: Edit**, scoped to the ClearAgent account |
+| `CLOUDFLARE_ACCOUNT_ID` | secret | ClearAgent account ID |
+| `R2_ARCHIVE_BUCKET` | variable | `clearagent-ofac-archive` (raw SDN/ALT archive, spec V3). If unset, archiving is skipped with a warning |
+
+A token without these permissions fails with `401 … {"code":10000,"message":"Authentication error"}` on the first `--remote` call. The poll step swallows that error and rebuilds every hour; the archive or publish step then fails the job. Every wrangler KV/R2 command needs `--remote`: wrangler 4 defaults to local storage, and before v0.5.2 that meant CI never wrote to production at all.
