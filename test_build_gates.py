@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """G8/G9 gate tests against built artifacts (v0.5.2 spec 6.1). python test_build_gates.py"""
 import copy, json, os, tempfile
-from check_build_gates import check
+from check_build_gates import check, g7
 
 idx = json.load(open("sdn_identifiers.json"))
 rows = [[e["uid"], n, e["type"]] for e in idx["entries"].values()
@@ -25,4 +25,10 @@ assert "G8" in gates(idx, {**names, "rows": rows + [[rows[0][0], "TORNADO CASH",
 # G9: a name row whose UID isn't in the identifier index, and a names index from another build.
 assert "G9" in gates(idx, {**names, "rows": rows + [["888888", "ORPHAN NAME", "entity"]]})
 assert "G9" in gates(idx, {**names, "listVersion": {**idx["listVersion"], "sha256": "0" * 64}})
-print("✓ G8/G9 gate tests passed")
+# G7 at publish (CA-522): equal → 0; OFAC ahead → positive, > 2 h not ok; skew → 0; no poll → not ok.
+lv = {"ofacLastModified": "2026-10-21T16:35:23Z"}
+assert g7(lv, "2026-10-21T16:35:23Z") == {"ok": True, "lagSeconds": 0, "polledLastModified": "2026-10-21T16:35:23Z"}
+assert g7(lv, "2026-10-21T18:35:24Z")["lagSeconds"] == 7201 and not g7(lv, "2026-10-21T18:35:24Z")["ok"]
+assert g7(lv, "2026-10-21T16:35:00Z")["lagSeconds"] == 0
+assert g7(lv, None) == {"ok": False, "lagSeconds": None, "polledLastModified": None}
+print("✓ G7/G8/G9 gate tests passed")

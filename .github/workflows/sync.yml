@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       build: ${{ steps.poll.outputs.build }}
+      ofac_lm: ${{ steps.poll.outputs.ofac_lm }}
     steps:
       - name: Compare OFAC Last-Modified with the published manifest
         id: poll
@@ -31,6 +32,14 @@ jobs:
           CUR=$(npx wrangler@4 kv key get --remote --namespace-id "$KV_NAMESPACE" "sdn:current" 2>/dev/null \
             | python3 -c "import json,sys; print(json.load(sys.stdin)['listVersion'].get('ofacLastModified',''))" 2>/dev/null || echo "")
           echo "OFAC Last-Modified: $OFAC_LM; manifest: ${CUR:-none}"
+          echo "ofac_lm=$OFAC_LM" >> "$GITHUB_OUTPUT"
+          # G7 (CA-522): record every successful poll; the worker pages if this goes 2 h without updating.
+          if [ -n "$OFAC_LM" ]; then
+            npx wrangler@4 kv key put --remote --namespace-id "$KV_NAMESPACE" "ofac:poll" \
+              "{\"ofacLastModified\":\"$OFAC_LM\",\"polledAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+          else
+            echo "::error::OFAC poll failed — no Last-Modified (G7 will page once the last poll is 2 h old)"
+          fi
           if [ -n "$OFAC_LM" ] && [ -n "$CUR" ] && [ "$OFAC_LM" \> "$CUR" ]; then
             LAG=$(( $(date -d "$OFAC_LM" +%s) - $(date -d "$CUR" +%s) ))
             if [ "$LAG" -gt 7200 ]; then echo "::warning::G7 manifest is $((LAG/3600))h behind OFAC Last-Modified"; fi
@@ -164,12 +173,41 @@ jobs:
       - name: Parse and normalise names
         run: python3 parse_ofac.py
 
+      - name: Fetch SDN XML (for wallet index — CSV truncates remarks)
+        run: |
+          fetch_xml() {
+            local url="$1" outfile="$2" label="$3"
+            echo "Trying $label..."
+            HTTP_STATUS=$(curl -sL -w "%{http_code}" -D "${outfile}.headers" \
+              -A "Mozilla/5.0 (compatible; ofac-sdn-mirror/1.0; +https://github.com/ClearAg3nt/ofac-sdn-mirror)" \
+              --max-time 120 -o "$outfile" "$url")
+            echo "  HTTP status: $HTTP_STATUS"
+            if [ "$HTTP_STATUS" != "200" ] || [ ! -s "$outfile" ]; then
+              echo "  ❌ Failed (status $HTTP_STATUS or empty)"
+              return 1
+            fi
+            echo "  ✓ Size: $(wc -c < "$outfile") bytes"
+            return 0
+          }
+          fetch_xml \
+            "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.XML" \
+            sdn.xml "OFAC API (primary)" \
+          || fetch_xml \
+            "https://www.treasury.gov/ofac/downloads/sdn.xml" \
+            sdn.xml "treasury.gov (fallback)" \
+          || { echo "❌ All SDN XML sources failed"; exit 1; }
+
       - name: Build identifier index and name index from the same download
         run: |
           python3 ingest_sdn_identifiers.py sdn.csv alt.csv sdn_identifiers.json "$OFAC_LAST_MODIFIED" "$FETCHED_AT"
           python3 build_names_index.py sdn_identifiers.json names.json
           echo "SDN_SHA=$(python3 -c "import json; print(json.load(open('sdn_identifiers.json'))['listVersion']['sha256'])")" >> "$GITHUB_ENV"
           echo "ALT_SHA=$(sha256sum alt.csv | cut -d' ' -f1)" >> "$GITHUB_ENV"
+
+      - name: Build wallet index from SDN XML (CA-521)
+        run: |
+          python3 build_wallets_index.py sdn.xml sdn_identifiers.json wallets.json "$OFAC_LAST_MODIFIED"
+          echo "Wallet index built"
 
       - name: Fetch the previous build (for G8 delisting)
         env:
@@ -183,8 +221,8 @@ jobs:
             && echo "PREV_ARG=--previous prev_identifiers.json" >> "$GITHUB_ENV" \
             || echo "::warning::no previous build readable from KV ($PREV_KEY); G8 runs on the TORNADO CASH canary only"
 
-      - name: Publish gates G1-G9 (fail = publish nothing, keep previous manifest)
-        run: python3 check_build_gates.py sdn.csv sdn_identifiers.json metadata.json names.json $PREV_ARG --manifest-out manifest.json
+      - name: Publish gates G1-G10 (fail = publish nothing, keep previous manifest)
+        run: python3 check_build_gates.py sdn.csv sdn_identifiers.json metadata.json names.json $PREV_ARG --manifest-out manifest.json --polled-last-modified "${{ needs.poll.outputs.ofac_lm }}" --wallets wallets.json
 
       - name: Archive raw OFAC files (V3, 7-year retention)
         env:
@@ -227,12 +265,13 @@ jobs:
           put() { npx wrangler@4 kv key put --remote --namespace-id "$KV_NAMESPACE" "$@"; }
           put "names:$SDN_SHA" --path names.json
           put "ids:$SDN_SHA"   --path sdn_identifiers.json
+          put "wallets:$SDN_SHA" --path wallets.json
           # Rollout step 1: the v0.5.1 single-object keys, read by the worker only while no manifest exists.
           put "ofac:ids:v2"     --path sdn_identifiers.json
           put "ofac:names:meta" "$(cat metadata.json)"
           # The pointer goes last: a worker sees either the old build or the new one, never a mix.
           put "sdn:current" --path manifest.json
-          echo "✓ KV updated: sdn:current -> $SDN_SHA"
+          echo "✓ KV updated: sdn:current -> $SDN_SHA (names + ids + wallets)"
 
       - name: Commit and push
         run: |
