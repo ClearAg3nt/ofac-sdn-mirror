@@ -3,9 +3,20 @@ name: Sync OFAC SDN Names
 # v0.5.2 (spec 2.1): one pipeline, one manifest. Poll hourly; rebuild when OFAC's
 # Last-Modified changes, and every night at 02:00 UTC regardless.
 on:
+  # Primary trigger: the kya-worker cron ('7 * * * *') calls workflow_dispatch with force=false,
+  # because GitHub throttles schedule on low-activity repos to every 3-6 h. This schedule is the backup.
   schedule:
     - cron: '7 * * * *'
-  workflow_dispatch:        # manual trigger via GitHub UI or API — always rebuilds
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild even if OFAC Last-Modified is unchanged'
+        type: boolean
+        default: true       # manual runs from the UI always rebuild
+
+concurrency:
+  group: ofac-sync          # worker dispatch + backup schedule can overlap; never publish twice at once
+  cancel-in-progress: false
 
 env:
   KV_NAMESPACE: 018833e0500d4df5b179c6c568e60d30
@@ -48,7 +59,7 @@ jobs:
             LAG=$(( $(date -d "$OFAC_LM" +%s) - $(date -d "$CUR" +%s) ))
             if [ "$LAG" -gt 7200 ]; then echo "::warning::G7 manifest is $((LAG/3600))h behind OFAC Last-Modified"; fi
           fi
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(date -u +%H)" = "02" ] || [ -z "$CUR" ] || [ "$OFAC_LM" != "$CUR" ]; then
+          if [ "${{ inputs.force }}" = "true" ] || [ "$(date -u +%H)" = "02" ] || [ -z "$CUR" ] || [ "$OFAC_LM" != "$CUR" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
           else
             echo "build=false" >> "$GITHUB_OUTPUT"; echo "No new OFAC file — skipping build"
