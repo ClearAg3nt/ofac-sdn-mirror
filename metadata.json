@@ -1,7 +1,7 @@
 {
-  "syncedAt": "2026-11-23T02:07:50.789018+00:00",
-  "sha256": "728c0490b2ab5f808be3b3e828bc823df7b64e07b67bc453bd794cccbc570d0b",
-  "count": 39305,
+  "syncedAt": "2026-11-23T18:07:50.140028+00:00",
+  "sha256": "89b2a6d6d825d3a0a5033c9d523ef8a5e05a0b766ccff1ad934aea7436da49b9",
+  "count": 39341,
   "source": "OFAC SDN + ALT lists (ofac.treas.gov)",
   "columns": {
     "sdn.csv": "SDN_Name (index 1)",
